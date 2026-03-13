@@ -23,6 +23,8 @@
   "target_volume": 0.10,
   "active_poll_interval_seconds": 0.05,
   "idle_poll_interval_seconds": 0.05,
+  "deep_idle_poll_interval_seconds": 0.1,
+  "deep_idle_after_seconds": 6.0,
   "audio_threshold": 0.01,
   "active_checks_to_trigger": 1,
   "silent_checks_to_restore": 3,

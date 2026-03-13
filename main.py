@@ -24,6 +24,8 @@ class Settings:
     target_volume: float
     active_poll_interval_seconds: float
     idle_poll_interval_seconds: float
+    deep_idle_poll_interval_seconds: float
+    deep_idle_after_seconds: float
     audio_threshold: float
     active_checks_to_trigger: int
     silent_checks_to_restore: int
@@ -58,6 +60,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_volume": 0.20,
     "active_poll_interval_seconds": 0.08,
     "idle_poll_interval_seconds": 0.25,
+    "deep_idle_poll_interval_seconds": 0.12,
+    "deep_idle_after_seconds": 6.0,
     "audio_threshold": 0.02,
     "active_checks_to_trigger": 1,
     "silent_checks_to_restore": 2,
@@ -132,6 +136,10 @@ def load_or_create_config(config_path: Path) -> Settings:
         idle_poll_interval_seconds=max(
             0.08, float(merged["idle_poll_interval_seconds"])
         ),
+        deep_idle_poll_interval_seconds=max(
+            0.08, float(merged["deep_idle_poll_interval_seconds"])
+        ),
+        deep_idle_after_seconds=max(1.0, float(merged["deep_idle_after_seconds"])),
         audio_threshold=max(0.0, float(merged["audio_threshold"])),
         active_checks_to_trigger=max(1, int(merged["active_checks_to_trigger"])),
         silent_checks_to_restore=max(1, int(merged["silent_checks_to_restore"])),
@@ -218,6 +226,7 @@ class AudioDucker:
         self._duck_started_at = 0.0
         self._last_trigger_audio_at = 0.0
         self._session_volume_cache: dict[int, tuple[Any, float]] = {}
+        self._last_activity_at = time.monotonic()
 
     def _log(self, msg: str) -> None:
         if self.settings.enable_console_logs:
@@ -271,24 +280,19 @@ class AudioDucker:
         trigger_audio = False
         music_sessions: list[tuple[int, str, str, Any, float]] = []
         fallback_sessions: list[tuple[int, str, str, Any, float]] = []
+        configured_candidates: list[tuple[int, str, Any]] = []
+        fallback_candidates: list[tuple[int, str, Any]] = []
 
         for session in AudioUtilities.GetAllSessions():
             process_name = _get_session_process_name(session)
+            pid = _get_session_pid(session)
 
             if _is_trigger_candidate(process_name, self.settings):
                 if _session_has_audio(session, self.settings.audio_threshold):
                     trigger_audio = True
 
             if _in_process_set(process_name, self.settings.music_processes):
-                try:
-                    pid = _get_session_pid(session)
-                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                    current = _clamp_unit(volume.GetMasterVolume())
-                    music_sessions.append(
-                        (pid, process_name, "configured", volume, current)
-                    )
-                except Exception:
-                    continue
+                configured_candidates.append((pid, process_name, session))
                 continue
 
             if (
@@ -297,12 +301,32 @@ class AudioDucker:
                 and (not _in_process_set(process_name, self.settings.ignored_processes))
                 and (not _is_in_trigger_list(process_name, self.settings))
             ):
+                fallback_candidates.append((pid, process_name, session))
+
+        # Only resolve session volume interfaces when we actually need to apply or prepare volume changes.
+        need_volume_details = (
+            self.ducking or trigger_audio or bool(self.original_volumes)
+        )
+
+        if configured_candidates and need_volume_details:
+            for pid, process_name, session in configured_candidates:
+                try:
+                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                    current = _clamp_unit(volume.GetMasterVolume())
+                    music_sessions.append(
+                        (pid, process_name, "configured", volume, current)
+                    )
+                except Exception:
+                    continue
+
+        used_fallback = False
+        if not configured_candidates and need_volume_details:
+            for pid, process_name, session in fallback_candidates:
                 try:
                     if not _session_has_audio(
                         session, max(0.005, self.settings.audio_threshold * 0.5)
                     ):
                         continue
-                    pid = _get_session_pid(session)
                     volume = session._ctl.QueryInterface(ISimpleAudioVolume)
                     current = _clamp_unit(volume.GetMasterVolume())
                     fallback_sessions.append(
@@ -311,10 +335,9 @@ class AudioDucker:
                 except Exception:
                     continue
 
-        used_fallback = False
-        if not music_sessions and fallback_sessions:
-            music_sessions = fallback_sessions
-            used_fallback = True
+            if fallback_sessions:
+                music_sessions = fallback_sessions
+                used_fallback = True
 
         return trigger_audio, music_sessions, used_fallback
 
@@ -449,6 +472,11 @@ class AudioDucker:
                 if transition == "duck_start":
                     self._log_matched_sessions(music_sessions, trigger_audio)
 
+                if trigger_audio:
+                    self._last_activity_at = now
+                elif self.ducking:
+                    self._last_activity_at = now
+
                 if used_fallback and trigger_audio:
                     now = time.monotonic()
                     if now - self._last_no_music_log_at >= 5.0:
@@ -470,7 +498,18 @@ class AudioDucker:
                     if (self.ducking or trigger_audio)
                     else self.settings.idle_poll_interval_seconds
                 )
-                self._apply_volume_step(music_sessions, interval)
+
+                if (not self.ducking) and (not trigger_audio):
+                    idle_elapsed = now - self._last_activity_at
+                    if idle_elapsed >= self.settings.deep_idle_after_seconds:
+                        interval = max(
+                            interval, self.settings.deep_idle_poll_interval_seconds
+                        )
+
+                # Skip volume-write path when there is no active ducking work to do.
+                if self.ducking or trigger_audio or self.original_volumes:
+                    self._apply_volume_step(music_sessions, interval)
+
                 self.stop_event.wait(interval)
         finally:
             self._restore_all_known_volumes()

@@ -1,5 +1,7 @@
 # Windows 11 音量自动压低（音乐避让）
 
+**本项目全部由AI完成,人类只负责提供思路和要求**
+
 本项目用于实现以下效果：
 
 - 音乐软件正在播放时，如果网页视频或本地播放器开始出声，自动压低音乐音量。
@@ -62,6 +64,8 @@ python main.py
 	"target_volume": 0.02,
 	"active_poll_interval_seconds": 0.02,
 	"idle_poll_interval_seconds": 0.05,
+	"deep_idle_poll_interval_seconds": 0.1,
+	"deep_idle_after_seconds": 6.0,
 	"audio_threshold": 0.01,
 	"active_checks_to_trigger": 1,
 	"silent_checks_to_restore": 1,
@@ -120,62 +124,74 @@ python main.py
 - 推荐值：`0.05 ~ 0.2`。
 - 说明：越大越省资源，但从空闲到触发的首帧响应会变慢。
 
-8. `audio_threshold`
+8. `deep_idle_poll_interval_seconds`
+
+- 含义：进入深度空闲后的轮询间隔（秒），用于进一步降低 CPU 占用。
+- 推荐值：`0.08 ~ 0.2`。
+- 说明：该值仅在持续空闲一段时间后生效，不影响触发时低延时。
+
+9. `deep_idle_after_seconds`
+
+- 含义：持续空闲多久后切换到深度空闲轮询（秒）。
+- 推荐值：`4 ~ 15`。
+- 说明：值越小越省 CPU，但从长期空闲恢复到首次检测会略慢。
+
+10. `audio_threshold`
 
 - 含义：判定“该会话正在出声”的峰值阈值。
 - 推荐值：`0.005 ~ 0.02`。
 - 说明：太高会漏检，太低会更敏感。
 
-9. `active_checks_to_trigger`
+11. `active_checks_to_trigger`
 
 - 含义：连续检测到触发音频多少次才开始压低。
 - 推荐值：`1`（最低延时）或 `2`（更稳）。
 
-10. `silent_checks_to_restore`
+12. `silent_checks_to_restore`
 
 - 含义：连续检测到静音多少次才开始恢复。
 - 推荐值：`1 ~ 2`。
 
-11. `min_duck_seconds`
+13. `min_duck_seconds`
 
 - 含义：进入压低后至少保持的最短时长（秒）。
 - 推荐值：`0.1 ~ 0.6`。
 - 说明：过小可能抖动，过大则恢复慢。
 
-12. `restore_silence_seconds`
+14. `restore_silence_seconds`
 
 - 含义：触发源持续静音多久后才允许恢复（秒）。
 - 推荐值：`0.2 ~ 1.0`。
 - 说明：你当前追求快速恢复可用 `0.2 ~ 0.4`。
 
-13. `fade_down_seconds`
+15. `fade_down_seconds`
 
 - 含义：压低音量的淡出时长（秒）。
 - 推荐值：`0.12 ~ 0.3`。
 
-14. `fade_up_seconds`
+16. `fade_up_seconds`
 
 - 含义：恢复音量的淡入时长（秒）。
 - 推荐值：`0.12 ~ 0.35`。
 
-15. `tray_title`
+17. `tray_title`
 
 - 含义：托盘图标显示的标题文本。
 - 推荐值：`"Auto Volume Ducker"` 或自定义中文名。
 
-16. `enable_console_logs`
+18. `enable_console_logs`
 
 - 含义：是否在终端打印日志。
 - 取值：`true` / `false`。
 - 推荐值：调试时 `true`，长期后台运行可 `false`。
 
-17. `enable_file_logs`
+19. `enable_file_logs`
 
 - 含义：是否写入日志文件 `auto-volume-ducker.log`。
 - 取值：`true` / `false`。
 - 推荐值：`true`（排错方便）。
 
-18. `debug_session_logs`
+20. `debug_session_logs`
 
 - 含义：是否输出匹配到的会话详情日志。
 - 取值：`true` / `false`。
@@ -187,6 +203,8 @@ python main.py
 
 - `active_poll_interval_seconds`: `0.02`
 - `idle_poll_interval_seconds`: `0.05`
+- `deep_idle_poll_interval_seconds`: `0.1`
+- `deep_idle_after_seconds`: `6.0`
 - `audio_threshold`: `0.01`
 - `active_checks_to_trigger`: `1`
 - `silent_checks_to_restore`: `1`
