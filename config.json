@@ -19,20 +19,19 @@
     "searchhost.exe",
     "explorer.exe"
   ],
-  "strict_trigger_processes": true,
   "fallback_duck_non_trigger_sessions": true,
-  "target_volume": 0.02,
-  "active_poll_interval_seconds": 0.03,
-  "idle_poll_interval_seconds": 0.06,
-  "audio_threshold": 0.008,
+  "target_volume": 0.10,
+  "active_poll_interval_seconds": 0.05,
+  "idle_poll_interval_seconds": 0.05,
+  "audio_threshold": 0.01,
   "active_checks_to_trigger": 1,
-  "silent_checks_to_restore": 1,
+  "silent_checks_to_restore": 3,
   "min_duck_seconds": 0.15,
   "restore_silence_seconds": 0.35,
   "fade_down_seconds": 0.2,
-  "fade_up_seconds": 0.2,
+  "fade_up_seconds": 0.7,
   "tray_title": "Auto Volume Ducker",
-  "enable_console_logs": true,
+  "enable_console_logs": false,
   "enable_file_logs": true,
-  "debug_session_logs": true
+  "debug_session_logs": false
 }

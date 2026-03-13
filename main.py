@@ -20,7 +20,6 @@ class Settings:
     music_processes: set[str]
     trigger_processes: set[str]
     ignored_processes: set[str]
-    strict_trigger_processes: bool
     fallback_duck_non_trigger_sessions: bool
     target_volume: float
     active_poll_interval_seconds: float
@@ -55,7 +54,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "searchhost.exe",
         "explorer.exe",
     ],
-    "strict_trigger_processes": False,
     "fallback_duck_non_trigger_sessions": True,
     "target_volume": 0.20,
     "active_poll_interval_seconds": 0.08,
@@ -124,7 +122,6 @@ def load_or_create_config(config_path: Path) -> Settings:
         ignored_processes={
             _normalize_process_name(x) for x in merged["ignored_processes"] if x
         },
-        strict_trigger_processes=bool(merged["strict_trigger_processes"]),
         fallback_duck_non_trigger_sessions=bool(
             merged["fallback_duck_non_trigger_sessions"]
         ),
