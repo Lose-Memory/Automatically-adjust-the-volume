@@ -1,0 +1,14 @@
+[2026-03-13 17:05:39] Auto volume ducking started.
+[2026-03-13 17:05:39] Config: E:\OTHERS\Python\Automatically adjust the volume\config.json
+[2026-03-13 17:05:39] Music processes: ['cloudmusic.exe', 'qqmusic.exe', 'spotify.exe']
+[2026-03-13 17:05:39] Trigger processes: ['chrome.exe', 'firefox.exe', 'mpv.exe', 'msedge.exe', 'potplayermini64.exe', 'vlc.exe']
+[2026-03-13 17:05:45] Video audio detected, start ducking.
+[2026-03-13 17:05:45] Matched music sessions [trigger_on]: cloudmusic.exe(pid=11332,src=configured,vol=1.00)
+[2026-03-13 17:05:50] Video audio stopped, start restoring.
+[2026-03-13 17:06:15] Auto volume ducking started.
+[2026-03-13 17:06:15] Config: E:\OTHERS\Python\Automatically adjust the volume\config.json
+[2026-03-13 17:06:15] Music processes: ['cloudmusic.exe', 'qqmusic.exe', 'spotify.exe']
+[2026-03-13 17:06:15] Trigger processes: ['chrome.exe', 'firefox.exe', 'mpv.exe', 'msedge.exe', 'potplayermini64.exe', 'vlc.exe']
+[2026-03-13 17:06:20] Video audio detected, start ducking.
+[2026-03-13 17:06:20] Matched music sessions [trigger_on]: cloudmusic.exe(pid=11332,src=configured,vol=1.00)
+[2026-03-13 17:06:26] Video audio stopped, start restoring.
