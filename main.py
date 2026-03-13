@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import msvcrt
 import sys
 import threading
 import time
@@ -482,38 +481,6 @@ class AudioDucker:
             CoUninitialize()
 
 
-def _watch_esc_to_stop(ducker: AudioDucker) -> None:
-    while not ducker.stop_event.is_set():
-        try:
-            if msvcrt.kbhit():
-                key = msvcrt.getwch()
-                if key == "\x1b":  # ESC
-                    ducker._log("ESC pressed, stopping service.")
-                    ducker.stop()
-                    return
-        except Exception:
-            return
-        time.sleep(0.05)
-
-
-def _watch_stdin_command_to_stop(ducker: AudioDucker) -> None:
-    # Allows users to type "esc" + Enter when ESC key capture is unavailable.
-    while not ducker.stop_event.is_set():
-        try:
-            line = sys.stdin.readline()
-        except Exception:
-            return
-
-        if not line:
-            return
-
-        cmd = line.strip().lower()
-        if cmd in {"esc", "exit", "quit", "q"}:
-            ducker._log("Stop command received from stdin, stopping service.")
-            ducker.stop()
-            return
-
-
 class TrayHost:
     def __init__(self, ducker: AudioDucker):
         self.ducker = ducker
@@ -582,15 +549,7 @@ def run() -> None:
         return
 
     if args.no_tray:
-        print("Press ESC, or type 'esc' then Enter, to stop and restore volume.")
-        esc_thread = threading.Thread(
-            target=_watch_esc_to_stop, args=(ducker,), daemon=True
-        )
-        esc_thread.start()
-        stdin_thread = threading.Thread(
-            target=_watch_stdin_command_to_stop, args=(ducker,), daemon=True
-        )
-        stdin_thread.start()
+        print("Running in foreground mode. Close this terminal to stop the program.")
         ducker.run_forever()
         return
 
