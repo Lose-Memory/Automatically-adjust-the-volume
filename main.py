@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import msvcrt
 import sys
 import threading
 import time
@@ -220,6 +221,7 @@ class AudioDucker:
         self._last_session_debug_log_at = 0.0
         self._duck_started_at = 0.0
         self._last_trigger_audio_at = 0.0
+        self._session_volume_cache: dict[int, tuple[Any, float]] = {}
 
     def _log(self, msg: str) -> None:
         if self.settings.enable_console_logs:
@@ -237,6 +239,35 @@ class AudioDucker:
 
     def stop(self) -> None:
         self.stop_event.set()
+
+    def _restore_all_known_volumes(self) -> None:
+        # Try to restore every process volume we touched, even when exiting mid-duck.
+        for pid, (vol, original) in list(self._session_volume_cache.items()):
+            try:
+                vol.SetMasterVolume(_clamp_unit(original), None)
+            except Exception:
+                continue
+
+        # Best-effort restore for any sessions currently visible.
+        try:
+            for session in AudioUtilities.GetAllSessions():
+                process_name = _get_session_process_name(session)
+                if not _in_process_set(process_name, self.settings.music_processes):
+                    continue
+                pid = _get_session_pid(session)
+                if pid not in self.original_volumes:
+                    continue
+                try:
+                    vol = session._ctl.QueryInterface(ISimpleAudioVolume)
+                    vol.SetMasterVolume(_clamp_unit(self.original_volumes[pid]), None)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        self.original_volumes.clear()
+        self._session_volume_cache.clear()
+        self.ducking = False
 
     def _collect_audio_state(
         self,
@@ -357,6 +388,9 @@ class AudioDucker:
         for pid, _, _, vol, current in music_sessions:
             if self.ducking and pid not in self.original_volumes:
                 self.original_volumes[pid] = current
+                self._session_volume_cache[pid] = (vol, current)
+            elif pid in self.original_volumes:
+                self._session_volume_cache[pid] = (vol, self.original_volumes[pid])
 
             if self.ducking:
                 target = self.settings.target_volume
@@ -364,6 +398,9 @@ class AudioDucker:
             else:
                 target = self.original_volumes.get(pid, current)
                 max_delta = loop_interval / self.settings.fade_up_seconds
+
+            # Keep transitions smooth and avoid abrupt jumps.
+            max_delta = min(0.12, max(0.005, max_delta))
 
             next_volume = _clamp_unit(_approach(current, target, max_delta))
             if abs(next_volume - current) >= 0.001:
@@ -375,10 +412,12 @@ class AudioDucker:
             if (not self.ducking) and (pid in self.original_volumes):
                 if abs(target - next_volume) < 0.01:
                     self.original_volumes.pop(pid, None)
+                    self._session_volume_cache.pop(pid, None)
 
         for pid in tuple(self.original_volumes):
             if pid not in seen_pids:
                 self.original_volumes.pop(pid, None)
+                self._session_volume_cache.pop(pid, None)
 
     def run_once(self) -> None:
         CoInitialize()
@@ -438,7 +477,41 @@ class AudioDucker:
                 self._apply_volume_step(music_sessions, interval)
                 self.stop_event.wait(interval)
         finally:
+            self._restore_all_known_volumes()
+            self._log("Volumes restored; service stopped.")
             CoUninitialize()
+
+
+def _watch_esc_to_stop(ducker: AudioDucker) -> None:
+    while not ducker.stop_event.is_set():
+        try:
+            if msvcrt.kbhit():
+                key = msvcrt.getwch()
+                if key == "\x1b":  # ESC
+                    ducker._log("ESC pressed, stopping service.")
+                    ducker.stop()
+                    return
+        except Exception:
+            return
+        time.sleep(0.05)
+
+
+def _watch_stdin_command_to_stop(ducker: AudioDucker) -> None:
+    # Allows users to type "esc" + Enter when ESC key capture is unavailable.
+    while not ducker.stop_event.is_set():
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            return
+
+        if not line:
+            return
+
+        cmd = line.strip().lower()
+        if cmd in {"esc", "exit", "quit", "q"}:
+            ducker._log("Stop command received from stdin, stopping service.")
+            ducker.stop()
+            return
 
 
 class TrayHost:
@@ -509,6 +582,15 @@ def run() -> None:
         return
 
     if args.no_tray:
+        print("Press ESC, or type 'esc' then Enter, to stop and restore volume.")
+        esc_thread = threading.Thread(
+            target=_watch_esc_to_stop, args=(ducker,), daemon=True
+        )
+        esc_thread.start()
+        stdin_thread = threading.Thread(
+            target=_watch_stdin_command_to_stop, args=(ducker,), daemon=True
+        )
+        stdin_thread.start()
         ducker.run_forever()
         return
 
