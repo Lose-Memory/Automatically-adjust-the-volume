@@ -14,3 +14,35 @@
 [2026-03-13 17:43:12] Video audio stopped, start restoring.
 [2026-03-13 17:43:39] Video audio detected, start ducking.
 [2026-03-13 17:43:42] Video audio stopped, start restoring.
+[2026-03-15 14:49:30] Video audio detected, start fade-out then pause.
+[2026-03-15 15:10:49] Service started.
+[2026-03-15 15:10:49] music_processes=['cloudmusic.exe', 'qqmusic.exe', 'spotify.exe']
+[2026-03-15 15:10:49] video_processes=['chrome.exe', 'firefox.exe', 'msedge.exe', 'potplayermini64.exe']
+[2026-03-15 15:10:49] poll_interval_ms=80
+[2026-03-15 15:10:49] toggle_hotkey=alt+ctrl+q
+[2026-03-15 15:10:49] Transition nq->q detected; music_playing_before_video=False.
+[2026-03-15 15:15:18] Service started.
+[2026-03-15 15:15:18] music_processes=['cloudmusic.exe', 'qqmusic.exe', 'spotify.exe']
+[2026-03-15 15:15:18] video_processes=['chrome.exe', 'firefox.exe', 'msedge.exe', 'potplayermini64.exe']
+[2026-03-15 15:15:18] poll_interval_ms=80
+[2026-03-15 15:15:18] video_stop_grace_ms=1200
+[2026-03-15 15:15:18] toggle_hotkey=alt+ctrl+q
+[2026-03-15 15:15:18] Transition nq->q detected; music_playing_before_video=False.
+[2026-03-15 15:21:04] Service started.
+[2026-03-15 15:21:04] music_processes=['cloudmusic.exe', 'qqmusic.exe', 'spotify.exe']
+[2026-03-15 15:21:04] video_processes=['chrome.exe', 'firefox.exe', 'msedge.exe', 'potplayermini64.exe']
+[2026-03-15 15:21:04] poll_interval_ms=50
+[2026-03-15 15:21:04] video_stop_grace_ms=1500
+[2026-03-15 15:21:04] toggle_hotkey=alt+ctrl+q
+[2026-03-15 15:24:15] Service started.
+[2026-03-15 15:24:15] music_processes=['cloudmusic.exe', 'qqmusic.exe', 'spotify.exe']
+[2026-03-15 15:24:15] video_processes=['chrome.exe', 'firefox.exe', 'msedge.exe', 'potplayermini64.exe']
+[2026-03-15 15:24:15] poll_interval_ms=50
+[2026-03-15 15:24:15] video_stop_grace_ms=1500
+[2026-03-15 15:24:15] toggle_hotkey=media_play_pause
+[2026-03-15 15:29:41] Service started.
+[2026-03-15 15:29:41] music_processes=['cloudmusic.exe', 'qqmusic.exe', 'spotify.exe']
+[2026-03-15 15:29:41] video_processes=['chrome.exe', 'firefox.exe', 'msedge.exe', 'potplayermini64.exe']
+[2026-03-15 15:29:41] poll_interval_ms=50
+[2026-03-15 15:29:41] video_stop_grace_ms=1500
+[2026-03-15 15:29:41] toggle_hotkey=media_play_pause

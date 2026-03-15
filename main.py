@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import importlib
+import ctypes
 import json
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -12,189 +11,153 @@ from pathlib import Path
 from typing import Any
 
 from comtypes import CoInitialize, CoUninitialize
-from pycaw.pycaw import AudioUtilities, IAudioMeterInformation, ISimpleAudioVolume
+from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
+
+KEYEVENTF_KEYUP = 0x0002
+AUDIO_THRESHOLD = 0.01
+HOTKEY_RETRY_LIMIT = 3
+HOTKEY_VERIFY_DELAY_SECONDS = 0.25
+PAUSE_VERIFY_TIMEOUT_SECONDS = 1.2
+RESUME_VERIFY_TIMEOUT_SECONDS = 1.5
+VERIFY_POLL_INTERVAL_SECONDS = 0.1
+VERIFY_CONSECUTIVE_HITS_PAUSE = 1
+VERIFY_CONSECUTIVE_HITS_RESUME = 2
+RETRY_GAP_SECONDS = 0.25
 
 
 @dataclass
 class Settings:
     music_processes: set[str]
-    trigger_processes: set[str]
-    ignored_processes: set[str]
-    fallback_duck_non_trigger_sessions: bool
-    target_volume: float
-    active_poll_interval_seconds: float
-    idle_poll_interval_seconds: float
-    deep_idle_poll_interval_seconds: float
-    deep_idle_after_seconds: float
-    audio_threshold: float
-    active_checks_to_trigger: int
-    silent_checks_to_restore: int
-    min_duck_seconds: float
-    restore_silence_seconds: float
-    fade_down_seconds: float
-    fade_up_seconds: float
-    tray_title: str
-    enable_console_logs: bool
-    enable_file_logs: bool
-    debug_session_logs: bool
+    video_processes: set[str]
+    poll_interval_ms: int
+    video_stop_grace_ms: int
+    toggle_hotkey: str
+    enable_logs: bool
 
 
-DEFAULT_CONFIG: dict[str, Any] = {
+DEFAULT_CONFIG: dict[str, object] = {
     "music_processes": ["cloudmusic.exe", "qqmusic.exe", "spotify.exe"],
-    "trigger_processes": [
+    "video_processes": [
         "chrome.exe",
         "msedge.exe",
         "firefox.exe",
         "potplayermini64.exe",
-        "vlc.exe",
-        "mpv.exe",
     ],
-    "ignored_processes": [
-        "system",
-        "svchost.exe",
-        "audiodg.exe",
-        "searchhost.exe",
-        "explorer.exe",
-    ],
-    "fallback_duck_non_trigger_sessions": True,
-    "target_volume": 0.20,
-    "active_poll_interval_seconds": 0.08,
-    "idle_poll_interval_seconds": 0.25,
-    "deep_idle_poll_interval_seconds": 0.12,
-    "deep_idle_after_seconds": 6.0,
-    "audio_threshold": 0.02,
-    "active_checks_to_trigger": 1,
-    "silent_checks_to_restore": 2,
-    "min_duck_seconds": 1.0,
-    "restore_silence_seconds": 1.2,
-    "fade_down_seconds": 0.22,
-    "fade_up_seconds": 0.30,
-    "tray_title": "Auto Volume Ducker",
-    "enable_console_logs": True,
-    "enable_file_logs": True,
-    "debug_session_logs": True,
+    "poll_interval_ms": 80,
+    "video_stop_grace_ms": 1200,
+    "toggle_hotkey": "alt+ctrl+q",
+    "enable_logs": True,
 }
 
 
+class Logger:
+    def __init__(self, config_path: Path, enabled: bool) -> None:
+        self.enabled = enabled
+        self.log_path = config_path.with_name("auto-volume-ducker.log")
+
+    def log(self, message: str) -> None:
+        if not self.enabled:
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        print(line)
+        try:
+            with self.log_path.open("a", encoding="utf-8") as file:
+                file.write(line + "\n")
+        except Exception:
+            pass
+
+
+class RuntimeControl:
+    def __init__(self, settings: Settings):
+        self.stop_event = threading.Event()
+        self.reload_event = threading.Event()
+        self._lock = threading.Lock()
+        self.settings = settings
+        self.hotkey_vks = parse_hotkey(settings.toggle_hotkey)
+
+    def snapshot(self) -> tuple[Settings, list[int]]:
+        with self._lock:
+            return self.settings, list(self.hotkey_vks)
+
+    def request_reload(self) -> None:
+        self.reload_event.set()
+
+    def apply_reload(self, config_path: Path, logger: Logger) -> bool:
+        try:
+            new_settings = load_or_create_config(config_path)
+            new_hotkey_vks = parse_hotkey(new_settings.toggle_hotkey)
+        except Exception as exc:
+            logger.log(f"Reload failed: {exc}")
+            return False
+
+        with self._lock:
+            self.settings = new_settings
+            self.hotkey_vks = new_hotkey_vks
+
+        logger.log("Config reloaded.")
+        logger.log(f"music_processes={sorted(new_settings.music_processes)}")
+        logger.log(f"video_processes={sorted(new_settings.video_processes)}")
+        logger.log(f"poll_interval_ms={new_settings.poll_interval_ms}")
+        logger.log(f"video_stop_grace_ms={new_settings.video_stop_grace_ms}")
+        logger.log(f"toggle_hotkey={new_settings.toggle_hotkey}")
+        return True
+
+
 def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
-def _normalize_process_name(name: str | None) -> str:
+def normalize_process_name(name: str | None) -> str:
     return (name or "").strip().lower()
-
-
-def _process_name_stem(name: str) -> str:
-    if name.endswith(".exe"):
-        return name[:-4]
-    return name
-
-
-def _in_process_set(process_name: str, process_set: set[str]) -> bool:
-    if process_name in process_set:
-        return True
-    stem = _process_name_stem(process_name)
-    for item in process_set:
-        if _process_name_stem(item) == stem:
-            return True
-    return False
-
-
-def _clamp_unit(value: float) -> float:
-    return max(0.0, min(1.0, value))
 
 
 def load_or_create_config(config_path: Path) -> Settings:
     if not config_path.exists():
         config_path.write_text(
-            json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
-        print(f"Created config file: {config_path}")
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-    merged = DEFAULT_CONFIG | raw
+
+    music_processes = {
+        normalize_process_name(item)
+        for item in raw.get("music_processes", DEFAULT_CONFIG["music_processes"])
+        if item
+    }
+    video_processes = {
+        normalize_process_name(item)
+        for item in raw.get("video_processes", DEFAULT_CONFIG["video_processes"])
+        if item
+    }
 
     return Settings(
-        music_processes={
-            _normalize_process_name(x) for x in merged["music_processes"] if x
-        },
-        trigger_processes={
-            _normalize_process_name(x) for x in merged["trigger_processes"] if x
-        },
-        ignored_processes={
-            _normalize_process_name(x) for x in merged["ignored_processes"] if x
-        },
-        fallback_duck_non_trigger_sessions=bool(
-            merged["fallback_duck_non_trigger_sessions"]
+        music_processes=music_processes,
+        video_processes=video_processes,
+        poll_interval_ms=max(
+            20, int(raw.get("poll_interval_ms", DEFAULT_CONFIG["poll_interval_ms"]))
         ),
-        target_volume=_clamp_unit(float(merged["target_volume"])),
-        active_poll_interval_seconds=max(
-            0.03, float(merged["active_poll_interval_seconds"])
+        video_stop_grace_ms=max(
+            0,
+            int(raw.get("video_stop_grace_ms", DEFAULT_CONFIG["video_stop_grace_ms"])),
         ),
-        idle_poll_interval_seconds=max(
-            0.08, float(merged["idle_poll_interval_seconds"])
-        ),
-        deep_idle_poll_interval_seconds=max(
-            0.08, float(merged["deep_idle_poll_interval_seconds"])
-        ),
-        deep_idle_after_seconds=max(1.0, float(merged["deep_idle_after_seconds"])),
-        audio_threshold=max(0.0, float(merged["audio_threshold"])),
-        active_checks_to_trigger=max(1, int(merged["active_checks_to_trigger"])),
-        silent_checks_to_restore=max(1, int(merged["silent_checks_to_restore"])),
-        min_duck_seconds=max(0.0, float(merged["min_duck_seconds"])),
-        restore_silence_seconds=max(0.0, float(merged["restore_silence_seconds"])),
-        fade_down_seconds=max(0.01, float(merged["fade_down_seconds"])),
-        fade_up_seconds=max(0.01, float(merged["fade_up_seconds"])),
-        tray_title=str(merged["tray_title"]),
-        enable_console_logs=bool(merged["enable_console_logs"]),
-        enable_file_logs=bool(merged["enable_file_logs"]),
-        debug_session_logs=bool(merged["debug_session_logs"]),
+        toggle_hotkey=str(raw.get("toggle_hotkey", DEFAULT_CONFIG["toggle_hotkey"])),
+        enable_logs=bool(raw.get("enable_logs", DEFAULT_CONFIG["enable_logs"])),
     )
 
 
-def _get_session_process_name(session: Any) -> str:
+def get_session_process_name(session: object) -> str:
     try:
-        if session.Process:
-            return _normalize_process_name(session.Process.name())
+        process = session.Process
+        if process:
+            return normalize_process_name(process.name())
     except Exception:
         return ""
     return ""
 
 
-def _get_session_pid(session: Any) -> int:
-    try:
-        if session.Process:
-            return int(session.Process.pid)
-    except Exception:
-        return -1
-    return -1
-
-
-def _is_trigger_candidate(process_name: str, settings: Settings) -> bool:
-    if not process_name:
-        return False
-    if _in_process_set(process_name, settings.music_processes):
-        return False
-    if _in_process_set(process_name, settings.ignored_processes):
-        return False
-
-    # If trigger list is configured, only these processes can trigger ducking.
-    if settings.trigger_processes:
-        return _in_process_set(process_name, settings.trigger_processes)
-
-    # Backward-compatible fallback: no trigger list means any non-ignored app can trigger.
-    return True
-
-
-def _is_in_trigger_list(process_name: str, settings: Settings) -> bool:
-    return bool(settings.trigger_processes) and _in_process_set(
-        process_name, settings.trigger_processes
-    )
-
-
-def _session_has_audio(session: Any, threshold: float) -> bool:
+def session_has_audio(session: object, threshold: float) -> bool:
     try:
         meter = session._ctl.QueryInterface(IAudioMeterInformation)
         return meter.GetPeakValue() >= threshold
@@ -202,331 +165,292 @@ def _session_has_audio(session: Any, threshold: float) -> bool:
         return False
 
 
-def _approach(current: float, target: float, max_delta: float) -> float:
-    if abs(target - current) <= max_delta:
-        return target
-    if target > current:
-        return current + max_delta
-    return current - max_delta
+def get_play_states(settings: Settings) -> tuple[bool, bool]:
+    music_playing = False
+    video_playing = False
+
+    for session in AudioUtilities.GetAllSessions():
+        process_name = get_session_process_name(session)
+        if not process_name:
+            continue
+
+        if (not music_playing) and process_name in settings.music_processes:
+            music_playing = session_has_audio(session, AUDIO_THRESHOLD)
+
+        if (not video_playing) and process_name in settings.video_processes:
+            video_playing = session_has_audio(session, AUDIO_THRESHOLD)
+
+        if music_playing and video_playing:
+            break
+
+    return music_playing, video_playing
 
 
-class AudioDucker:
-    def __init__(self, config_path: Path):
-        self.config_path = config_path
-        self.settings = load_or_create_config(config_path)
-        self.log_path = config_path.with_name("auto-volume-ducker.log")
-        self.stop_event = threading.Event()
-        self.reload_event = threading.Event()
-        self.ducking = False
-        self.active_streak = 0
-        self.silent_streak = 0
-        self.original_volumes: dict[int, float] = {}
-        self._last_no_music_log_at = 0.0
-        self._last_session_debug_log_at = 0.0
-        self._duck_started_at = 0.0
-        self._last_trigger_audio_at = 0.0
-        self._session_volume_cache: dict[int, tuple[Any, float]] = {}
-        self._last_activity_at = time.monotonic()
+def vk_from_token(token: str) -> int | None:
+    key = token.strip().lower()
+    special: dict[str, int] = {
+        "ctrl": 0x11,
+        "control": 0x11,
+        "alt": 0x12,
+        "shift": 0x10,
+        "win": 0x5B,
+        "windows": 0x5B,
+        "space": 0x20,
+        "enter": 0x0D,
+        "tab": 0x09,
+        "esc": 0x1B,
+        "escape": 0x1B,
+        "up": 0x26,
+        "down": 0x28,
+        "left": 0x25,
+        "right": 0x27,
+        "media_play_pause": 0xB3,
+        "media_stop": 0xB2,
+        "media_next": 0xB0,
+        "media_prev": 0xB1,
+    }
+    if key in special:
+        return special[key]
 
-    def _log(self, msg: str) -> None:
-        if self.settings.enable_console_logs:
-            print(msg)
-        if self.settings.enable_file_logs:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            try:
-                with self.log_path.open("a", encoding="utf-8") as f:
-                    f.write(f"[{timestamp}] {msg}\n")
-            except Exception:
-                pass
+    if len(key) == 1 and "a" <= key <= "z":
+        return ord(key.upper())
+    if len(key) == 1 and "0" <= key <= "9":
+        return ord(key)
+    if len(key) >= 2 and key.startswith("f") and key[1:].isdigit():
+        fn = int(key[1:])
+        if 1 <= fn <= 24:
+            return 0x6F + fn
+    return None
 
-    def request_reload(self) -> None:
-        self.reload_event.set()
 
-    def stop(self) -> None:
-        self.stop_event.set()
+def parse_hotkey(combo: str) -> list[int]:
+    parts = [part.strip() for part in combo.split("+") if part.strip()]
+    if not parts:
+        raise ValueError("toggle_hotkey cannot be empty")
 
-    def _restore_all_known_volumes(self) -> None:
-        # Try to restore every process volume we touched, even when exiting mid-duck.
-        for pid, (vol, original) in list(self._session_volume_cache.items()):
-            try:
-                vol.SetMasterVolume(_clamp_unit(original), None)
-            except Exception:
-                continue
+    vks: list[int] = []
+    for part in parts:
+        vk = vk_from_token(part)
+        if vk is None:
+            raise ValueError(f"Unsupported hotkey token: {part}")
+        vks.append(vk)
+    return vks
 
-        # Best-effort restore for any sessions currently visible.
-        try:
-            for session in AudioUtilities.GetAllSessions():
-                process_name = _get_session_process_name(session)
-                if not _in_process_set(process_name, self.settings.music_processes):
-                    continue
-                pid = _get_session_pid(session)
-                if pid not in self.original_volumes:
-                    continue
-                try:
-                    vol = session._ctl.QueryInterface(ISimpleAudioVolume)
-                    vol.SetMasterVolume(_clamp_unit(self.original_volumes[pid]), None)
-                except Exception:
-                    continue
-        except Exception:
-            pass
 
-        self.original_volumes.clear()
-        self._session_volume_cache.clear()
-        self.ducking = False
+def send_hotkey(vks: list[int]) -> bool:
+    try:
+        for vk in vks:
+            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+        for vk in reversed(vks):
+            ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception:
+        return False
 
-    def _collect_audio_state(
-        self,
-    ) -> tuple[bool, list[tuple[int, str, str, Any, float]], bool]:
-        trigger_audio = False
-        music_sessions: list[tuple[int, str, str, Any, float]] = []
-        fallback_sessions: list[tuple[int, str, str, Any, float]] = []
-        configured_candidates: list[tuple[int, str, Any]] = []
-        fallback_candidates: list[tuple[int, str, Any]] = []
 
-        for session in AudioUtilities.GetAllSessions():
-            process_name = _get_session_process_name(session)
-            pid = _get_session_pid(session)
+def wait_for_music_target(
+    target_music_playing: bool,
+    video_expected: bool,
+    timeout_seconds: float,
+    required_hits: int,
+    settings: Settings,
+    logger: Logger,
+) -> tuple[bool, bool]:
+    deadline = time.monotonic() + timeout_seconds
+    hit_count = 0
 
-            if _is_trigger_candidate(process_name, self.settings):
-                if _session_has_audio(session, self.settings.audio_threshold):
-                    trigger_audio = True
+    while True:
+        current_music, current_video = get_play_states(settings)
 
-            if _in_process_set(process_name, self.settings.music_processes):
-                configured_candidates.append((pid, process_name, session))
-                continue
+        if current_video != video_expected:
+            logger.log("Video state changed while verifying hotkey result.")
+            return False, True
 
-            if (
-                self.settings.fallback_duck_non_trigger_sessions
-                and process_name
-                and (not _in_process_set(process_name, self.settings.ignored_processes))
-                and (not _is_in_trigger_list(process_name, self.settings))
-            ):
-                fallback_candidates.append((pid, process_name, session))
+        if current_music == target_music_playing:
+            hit_count += 1
+            if hit_count >= required_hits:
+                return True, False
+        else:
+            hit_count = 0
 
-        # Only resolve session volume interfaces when we actually need to apply or prepare volume changes.
-        need_volume_details = (
-            self.ducking or trigger_audio or bool(self.original_volumes)
+        if time.monotonic() >= deadline:
+            return False, False
+
+        time.sleep(VERIFY_POLL_INTERVAL_SECONDS)
+
+
+def try_reach_music_state(
+    target_music_playing: bool,
+    video_expected: bool,
+    hotkey_vks: list[int],
+    settings: Settings,
+    logger: Logger,
+) -> bool:
+    for attempt in range(1, HOTKEY_RETRY_LIMIT + 1):
+        current_music, current_video = get_play_states(settings)
+
+        if current_video != video_expected:
+            logger.log("Video state changed before sending hotkey; cancel transition.")
+            return False
+
+        if current_music == target_music_playing:
+            logger.log(
+                f"Target already reached before attempt {attempt}; music_playing={current_music}."
+            )
+            return True
+
+        if not send_hotkey(hotkey_vks):
+            logger.log(f"Hotkey send failed on attempt {attempt}/{HOTKEY_RETRY_LIMIT}.")
+            time.sleep(RETRY_GAP_SECONDS)
+            continue
+
+        if target_music_playing:
+            verify_timeout = RESUME_VERIFY_TIMEOUT_SECONDS
+            required_hits = VERIFY_CONSECUTIVE_HITS_RESUME
+        else:
+            # Pause state may take a few hundred ms to reflect on audio meters.
+            verify_timeout = max(
+                HOTKEY_VERIFY_DELAY_SECONDS, PAUSE_VERIFY_TIMEOUT_SECONDS
+            )
+            required_hits = VERIFY_CONSECUTIVE_HITS_PAUSE
+
+        ok, video_changed = wait_for_music_target(
+            target_music_playing=target_music_playing,
+            video_expected=video_expected,
+            timeout_seconds=verify_timeout,
+            required_hits=required_hits,
+            settings=settings,
+            logger=logger,
         )
 
-        if configured_candidates and need_volume_details:
-            for pid, process_name, session in configured_candidates:
-                try:
-                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                    current = _clamp_unit(volume.GetMasterVolume())
-                    music_sessions.append(
-                        (pid, process_name, "configured", volume, current)
-                    )
-                except Exception:
-                    continue
+        if ok:
+            logger.log(f"Hotkey succeeded on attempt {attempt}/{HOTKEY_RETRY_LIMIT}.")
+            return True
 
-        used_fallback = False
-        if not configured_candidates and need_volume_details:
-            for pid, process_name, session in fallback_candidates:
-                try:
-                    if not _session_has_audio(
-                        session, max(0.005, self.settings.audio_threshold * 0.5)
-                    ):
-                        continue
-                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                    current = _clamp_unit(volume.GetMasterVolume())
-                    fallback_sessions.append(
-                        (pid, process_name, "fallback", volume, current)
-                    )
-                except Exception:
-                    continue
+        if video_changed:
+            return False
 
-            if fallback_sessions:
-                music_sessions = fallback_sessions
-                used_fallback = True
+        logger.log(
+            f"Hotkey attempt {attempt}/{HOTKEY_RETRY_LIMIT} did not reach target state."
+        )
+        time.sleep(RETRY_GAP_SECONDS)
 
-        return trigger_audio, music_sessions, used_fallback
+    logger.log("Hotkey retries exhausted; target music state not reached.")
+    return False
 
-    def _update_mode(self, trigger_audio: bool, now: float) -> str | None:
-        if trigger_audio:
-            self._last_trigger_audio_at = now
-            self.active_streak += 1
-            self.silent_streak = 0
-        else:
-            self.silent_streak += 1
-            self.active_streak = 0
 
-        if (
-            not self.ducking
-            and self.active_streak >= self.settings.active_checks_to_trigger
-        ):
-            self.ducking = True
-            self._duck_started_at = now
-            self._log("Video audio detected, start ducking.")
-            return "duck_start"
+def service_loop(
+    config_path: Path,
+    control: RuntimeControl,
+    once: bool,
+) -> None:
+    settings, hotkey_vks = control.snapshot()
+    logger = Logger(config_path, settings.enable_logs)
+    poll_seconds = settings.poll_interval_ms / 1000.0
 
-        if (
-            self.ducking
-            and self.silent_streak >= self.settings.silent_checks_to_restore
-            and (now - self._last_trigger_audio_at)
-            >= self.settings.restore_silence_seconds
-            and (now - self._duck_started_at) >= self.settings.min_duck_seconds
-        ):
-            self.ducking = False
-            self._log("Video audio stopped, start restoring.")
-            return "duck_stop"
+    video_active = False
+    music_was_playing_before_video = False
+    music_paused_by_service = False
+    video_stop_started_at: float | None = None
 
-        return None
+    logger.log("Service started.")
+    logger.log(f"music_processes={sorted(settings.music_processes)}")
+    logger.log(f"video_processes={sorted(settings.video_processes)}")
+    logger.log(f"poll_interval_ms={settings.poll_interval_ms}")
+    logger.log(f"video_stop_grace_ms={settings.video_stop_grace_ms}")
+    logger.log(f"toggle_hotkey={settings.toggle_hotkey}")
 
-    def _log_matched_sessions(
-        self,
-        music_sessions: list[tuple[int, str, str, Any, float]],
-        trigger_audio: bool,
-    ) -> None:
-        if not self.settings.debug_session_logs:
-            return
+    CoInitialize()
+    try:
+        while not control.stop_event.is_set():
+            if control.reload_event.is_set():
+                if control.apply_reload(config_path, logger):
+                    settings, hotkey_vks = control.snapshot()
+                    poll_seconds = settings.poll_interval_ms / 1000.0
+                    logger.enabled = settings.enable_logs
+                    # Reset transition memory to avoid toggling on stale state.
+                    video_active = False
+                    music_was_playing_before_video = False
+                    music_paused_by_service = False
+                    video_stop_started_at = None
+                control.reload_event.clear()
 
-        now = time.monotonic()
-        if now - self._last_session_debug_log_at < 4.0:
-            return
+            settings, hotkey_vks = control.snapshot()
+            poll_seconds = settings.poll_interval_ms / 1000.0
+            music_playing, video_playing = get_play_states(settings)
 
-        self._last_session_debug_log_at = now
-
-        if not music_sessions:
-            self._log("Matched music sessions: none")
-            return
-
-        labels = [
-            f"{name or 'unknown'}(pid={pid},src={src},vol={current:.2f})"
-            for pid, name, src, _, current in music_sessions
-        ]
-        state = "trigger_on" if trigger_audio else "trigger_off"
-        self._log(f"Matched music sessions [{state}]: " + ", ".join(labels))
-
-    def _apply_volume_step(
-        self,
-        music_sessions: list[tuple[int, str, str, Any, float]],
-        loop_interval: float,
-    ) -> None:
-        seen_pids = {pid for pid, _, _, _, _ in music_sessions}
-
-        for pid, _, _, vol, current in music_sessions:
-            if self.ducking and pid not in self.original_volumes:
-                self.original_volumes[pid] = current
-                self._session_volume_cache[pid] = (vol, current)
-            elif pid in self.original_volumes:
-                self._session_volume_cache[pid] = (vol, self.original_volumes[pid])
-
-            if self.ducking:
-                target = self.settings.target_volume
-                max_delta = loop_interval / self.settings.fade_down_seconds
-            else:
-                target = self.original_volumes.get(pid, current)
-                max_delta = loop_interval / self.settings.fade_up_seconds
-
-            # Keep transitions smooth and avoid abrupt jumps.
-            max_delta = min(0.12, max(0.005, max_delta))
-
-            next_volume = _clamp_unit(_approach(current, target, max_delta))
-            if abs(next_volume - current) >= 0.001:
-                try:
-                    vol.SetMasterVolume(next_volume, None)
-                except Exception:
-                    continue
-
-            if (not self.ducking) and (pid in self.original_volumes):
-                if abs(target - next_volume) < 0.01:
-                    self.original_volumes.pop(pid, None)
-                    self._session_volume_cache.pop(pid, None)
-
-        for pid in tuple(self.original_volumes):
-            if pid not in seen_pids:
-                self.original_volumes.pop(pid, None)
-                self._session_volume_cache.pop(pid, None)
-
-    def run_once(self) -> None:
-        CoInitialize()
-        try:
-            trigger_audio, music_sessions, _ = self._collect_audio_state()
-            self._update_mode(trigger_audio, time.monotonic())
-            self._apply_volume_step(
-                music_sessions, self.settings.active_poll_interval_seconds
-            )
-        finally:
-            CoUninitialize()
-
-    def run_forever(self) -> None:
-        CoInitialize()
-        try:
-            self._log("Auto volume ducking started.")
-            self._log(f"Config: {self.config_path}")
-            self._log(f"Music processes: {sorted(self.settings.music_processes)}")
-            self._log(f"Trigger processes: {sorted(self.settings.trigger_processes)}")
-
-            while not self.stop_event.is_set():
-                if self.reload_event.is_set():
-                    self.settings = load_or_create_config(self.config_path)
-                    self.reload_event.clear()
-                    self._log("Config reloaded.")
-
-                trigger_audio, music_sessions, used_fallback = (
-                    self._collect_audio_state()
-                )
-                now = time.monotonic()
-                transition = self._update_mode(trigger_audio, now)
-
-                if transition == "duck_start":
-                    self._log_matched_sessions(music_sessions, trigger_audio)
-
-                if trigger_audio:
-                    self._last_activity_at = now
-                elif self.ducking:
-                    self._last_activity_at = now
-
-                if used_fallback and trigger_audio:
-                    now = time.monotonic()
-                    if now - self._last_no_music_log_at >= 5.0:
-                        self._log(
-                            "Using fallback music session matching (config music_processes not matched)."
-                        )
-                        self._last_no_music_log_at = now
-
-                if trigger_audio and not music_sessions:
-                    now = time.monotonic()
-                    if now - self._last_no_music_log_at >= 5.0:
-                        self._log(
-                            "Trigger audio detected but no music session matched; check music_processes in config.json."
-                        )
-                        self._last_no_music_log_at = now
-
-                interval = (
-                    self.settings.active_poll_interval_seconds
-                    if (self.ducking or trigger_audio)
-                    else self.settings.idle_poll_interval_seconds
+            if (not video_active) and video_playing:
+                video_active = True
+                video_stop_started_at = None
+                music_was_playing_before_video = music_playing
+                logger.log(
+                    f"Transition nq->q detected; music_playing_before_video={music_was_playing_before_video}."
                 )
 
-                if (not self.ducking) and (not trigger_audio):
-                    idle_elapsed = now - self._last_activity_at
-                    if idle_elapsed >= self.settings.deep_idle_after_seconds:
-                        interval = max(
-                            interval, self.settings.deep_idle_poll_interval_seconds
-                        )
+                if music_was_playing_before_video:
+                    music_paused_by_service = try_reach_music_state(
+                        target_music_playing=False,
+                        video_expected=True,
+                        hotkey_vks=hotkey_vks,
+                        settings=settings,
+                        logger=logger,
+                    )
+                else:
+                    music_paused_by_service = False
 
-                # Skip volume-write path when there is no active ducking work to do.
-                if self.ducking or trigger_audio or self.original_volumes:
-                    self._apply_volume_step(music_sessions, interval)
+            elif video_active:
+                if video_playing:
+                    video_stop_started_at = None
+                else:
+                    now = time.monotonic()
+                    if video_stop_started_at is None:
+                        video_stop_started_at = now
+                    else:
+                        gap_ms = int((now - video_stop_started_at) * 1000)
+                        if gap_ms >= settings.video_stop_grace_ms:
+                            video_active = False
+                            video_stop_started_at = None
+                            logger.log("Transition q->nq confirmed after grace period.")
 
-                self.stop_event.wait(interval)
-        finally:
-            self._restore_all_known_volumes()
-            self._log("Volumes restored; service stopped.")
-            CoUninitialize()
+                            if (
+                                music_was_playing_before_video
+                                and music_paused_by_service
+                            ):
+                                try_reach_music_state(
+                                    target_music_playing=True,
+                                    video_expected=False,
+                                    hotkey_vks=hotkey_vks,
+                                    settings=settings,
+                                    logger=logger,
+                                )
+                            music_was_playing_before_video = False
+                            music_paused_by_service = False
+
+            if once:
+                break
+
+            control.stop_event.wait(poll_seconds)
+    finally:
+        CoUninitialize()
 
 
 class TrayHost:
-    def __init__(self, ducker: AudioDucker):
-        self.ducker = ducker
+    def __init__(self, control: RuntimeControl, config_path: Path):
+        self.control = control
+        self.config_path = config_path
+        self.worker = threading.Thread(
+            target=service_loop,
+            args=(config_path, self.control, False),
+            daemon=True,
+        )
         self.icon: Any = None
-        self.worker = threading.Thread(target=self.ducker.run_forever, daemon=True)
-        self.pystray = importlib.import_module("pystray")
-        pil_image = importlib.import_module("PIL.Image")
-        pil_draw = importlib.import_module("PIL.ImageDraw")
-        self.Image = pil_image
-        self.ImageDraw = pil_draw
+
+        pystray_module = __import__("pystray")
+        image_module = __import__("PIL.Image", fromlist=["Image"])
+        draw_module = __import__("PIL.ImageDraw", fromlist=["ImageDraw"])
+        self.pystray = pystray_module
+        self.Image = image_module
+        self.ImageDraw = draw_module
 
     def _build_icon_image(self) -> Any:
         size = 64
@@ -540,34 +464,34 @@ class TrayHost:
         return image
 
     def _on_reload(self, _icon: Any, _item: Any) -> None:
-        self.ducker.request_reload()
+        self.control.request_reload()
 
     def _on_exit(self, icon: Any, _item: Any) -> None:
-        self.ducker.stop()
+        self.control.stop_event.set()
         icon.stop()
 
     def run(self) -> None:
         self.worker.start()
         self.icon = self.pystray.Icon(
-            "auto_volume_ducker",
+            "auto_music_pause",
             self._build_icon_image(),
-            self.ducker.settings.tray_title,
+            "Auto Music Pause",
             self.pystray.Menu(
                 self.pystray.MenuItem("Reload Config", self._on_reload),
                 self.pystray.MenuItem("Exit", self._on_exit),
             ),
         )
         self.icon.run()
-        self.ducker.stop()
+        self.control.stop_event.set()
         self.worker.join(timeout=2.0)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Windows audio ducking service")
-    parser.add_argument("--once", action="store_true", help="run one loop then exit")
+    parser = argparse.ArgumentParser(description="Pause music when video plays")
     parser.add_argument(
-        "--no-tray", action="store_true", help="run in foreground without tray icon"
+        "--once", action="store_true", help="run one poll loop then exit"
     )
+    parser.add_argument("--no-tray", action="store_true", help="run foreground mode")
     parser.add_argument("--config", type=str, default="", help="custom config path")
     return parser.parse_args()
 
@@ -577,28 +501,24 @@ def run() -> None:
     config_path = (
         Path(args.config).resolve() if args.config else get_base_dir() / "config.json"
     )
-    ducker = AudioDucker(config_path)
+    settings = load_or_create_config(config_path)
+    control = RuntimeControl(settings)
 
     if args.once:
-        ducker.run_once()
-        print("Self-check done.")
+        service_loop(config_path, control, once=True)
         return
 
     if args.no_tray:
-        print("Running in foreground mode. Close this terminal to stop the program.")
-        ducker.run_forever()
+        service_loop(config_path, control, once=False)
         return
 
     try:
-        importlib.import_module("pystray")
-        importlib.import_module("PIL.Image")
-        importlib.import_module("PIL.ImageDraw")
-    except ImportError as exc:
+        tray = TrayHost(control, config_path)
+    except Exception as exc:
         raise RuntimeError(
-            "Missing tray dependencies. Install with: pip install pystray pillow"
+            "Tray dependencies missing. Install with: pip install pystray pillow"
         ) from exc
 
-    tray = TrayHost(ducker)
     tray.run()
 
 

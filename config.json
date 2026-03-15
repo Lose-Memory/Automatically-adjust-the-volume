@@ -1,39 +1,13 @@
 {
-  "music_processes": [
-    "cloudmusic.exe",
-    "qqmusic.exe",
-    "spotify.exe"
-  ],
-  "trigger_processes": [
-    "chrome.exe",
-    "msedge.exe",
-    "firefox.exe",
-    "potplayermini64.exe",
-    "vlc.exe",
-    "mpv.exe"
-  ],
-  "ignored_processes": [
-    "system",
-    "svchost.exe",
-    "audiodg.exe",
-    "searchhost.exe",
-    "explorer.exe"
-  ],
-  "fallback_duck_non_trigger_sessions": true,
-  "target_volume": 0.10,
-  "active_poll_interval_seconds": 0.05,
-  "idle_poll_interval_seconds": 0.05,
-  "deep_idle_poll_interval_seconds": 0.1,
-  "deep_idle_after_seconds": 6.0,
-  "audio_threshold": 0.01,
-  "active_checks_to_trigger": 1,
-  "silent_checks_to_restore": 3,
-  "min_duck_seconds": 0.15,
-  "restore_silence_seconds": 0.35,
-  "fade_down_seconds": 0.2,
-  "fade_up_seconds": 0.7,
-  "tray_title": "Auto Volume Ducker",
-  "enable_console_logs": false,
-  "enable_file_logs": true,
-  "debug_session_logs": false
+    "music_processes": [
+        "cloudmusic.exe"
+    ],
+    "video_processes": [
+        "chrome.exe",
+        "msedge.exe"
+    ],
+    "poll_interval_ms": 50,
+    "video_stop_grace_ms": 1000,
+    "toggle_hotkey": "media_play_pause",
+    "enable_logs": true
 }
