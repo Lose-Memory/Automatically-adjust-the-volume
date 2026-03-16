@@ -18,11 +18,11 @@ AUDIO_THRESHOLD = 0.01
 HOTKEY_RETRY_LIMIT = 3
 HOTKEY_VERIFY_DELAY_SECONDS = 0.25
 PAUSE_VERIFY_TIMEOUT_SECONDS = 1.2
-RESUME_VERIFY_TIMEOUT_SECONDS = 1.5
+RESUME_VERIFY_TIMEOUT_SECONDS = 1.8
 VERIFY_POLL_INTERVAL_SECONDS = 0.1
 VERIFY_CONSECUTIVE_HITS_PAUSE = 1
 VERIFY_CONSECUTIVE_HITS_RESUME = 2
-RETRY_GAP_SECONDS = 0.25
+RETRY_GAP_SECONDS = 0.3
 
 
 @dataclass
@@ -308,7 +308,6 @@ def try_reach_music_state(
             verify_timeout = RESUME_VERIFY_TIMEOUT_SECONDS
             required_hits = VERIFY_CONSECUTIVE_HITS_RESUME
         else:
-            # Pause state may take a few hundred ms to reflect on audio meters.
             verify_timeout = max(
                 HOTKEY_VERIFY_DELAY_SECONDS, PAUSE_VERIFY_TIMEOUT_SECONDS
             )
@@ -384,7 +383,8 @@ def service_loop(
                 video_stop_started_at = None
                 music_was_playing_before_video = music_playing
                 logger.log(
-                    f"Transition nq->q detected; music_playing_before_video={music_was_playing_before_video}."
+                    "Transition nq->q detected; "
+                    f"music_playing_before_video={music_was_playing_before_video}."
                 )
 
                 if music_was_playing_before_video:
@@ -423,6 +423,7 @@ def service_loop(
                                     settings=settings,
                                     logger=logger,
                                 )
+
                             music_was_playing_before_video = False
                             music_paused_by_service = False
 
